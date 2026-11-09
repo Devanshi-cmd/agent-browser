@@ -1696,6 +1696,22 @@ fn main() {
     {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
+    // Reject a bad page-header value before the daemon starts. Batch items reuse
+    // the outer `--headers`, so a batch is checked here too.
+    let uses_headers = matches!(
+        cmd.get("action").and_then(|v| v.as_str()),
+        Some("navigate") | Some("read") | Some("batch")
+    );
+    if let (true, Some(raw)) = (uses_headers, flags.headers.as_deref()) {
+        if let Err(msg) = commands::parse_page_headers(raw) {
+            if flags.json {
+                print_json_error(&msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+    }
     match cmd.get("action").and_then(|v| v.as_str()) {
         Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
         Some("close") => forget_before_close(&flags.session),
