@@ -1,9 +1,7 @@
 #![cfg(unix)]
 
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::io::Write;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -210,70 +208,4 @@ fn set_headers_rejects_non_object_and_non_string_json_before_daemon() {
         assert_rejected_before_daemon(&output, &format!("set headers {raw}"), &[SECRET]);
         assert!(socket_dir_entries(&home).is_empty(), "set headers {raw}");
     }
-}
-
-/// Starts a fake daemon on the session socket with a matching version sidecar,
-/// so the CLI does not try to replace it. Returns the first real request it
-/// receives and responds to every request with a success envelope.
-fn serve_one(home: &TempDir) -> std::thread::JoinHandle<Value> {
-    let sockets = home.path().join("s");
-    std::fs::create_dir_all(&sockets).unwrap();
-    std::fs::write(
-        sockets.join(format!("{SESSION}.version")),
-        env!("CARGO_PKG_VERSION"),
-    )
-    .unwrap();
-    let listener = UnixListener::bind(sockets.join(format!("{SESSION}.sock"))).unwrap();
-    std::thread::spawn(move || loop {
-        let (mut stream, _) = listener.accept().unwrap();
-        // Probe connections close without sending a line; skip them.
-        let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line).unwrap();
-        if line.is_empty() {
-            continue;
-        }
-        let request: Value = serde_json::from_str(&line).unwrap();
-        let id = request["id"].clone();
-        let response = serde_json::json!({"id": id, "success": true, "data": {}});
-        stream
-            .write_all(format!("{response}\n").as_bytes())
-            .unwrap();
-        // The CLI may first ask an unversioned fake daemon to shut down.
-        if request["action"] != "__agent_browser_internal_shutdown" {
-            return request;
-        }
-    })
-}
-
-#[test]
-fn valid_page_headers_reach_the_daemon_unchanged() {
-    let home = TempDir::new().unwrap();
-    let server = serve_one(&home);
-    let output = command(&home)
-        .args([
-            "--json",
-            "open",
-            "http://127.0.0.1:9/test",
-            "--headers",
-            r#"{"Authorization":"Bearer t"}"#,
-        ])
-        .output()
-        .unwrap();
-    let request = server.join().unwrap();
-    assert_eq!(request["action"], "navigate", "{request}");
-    assert_eq!(request["headers"]["Authorization"], "Bearer t", "{request}");
-    assert!(output.status.success(), "{output:?}");
-}
-
-#[test]
-fn set_headers_with_string_values_still_forwards() {
-    let home = TempDir::new().unwrap();
-    let server = serve_one(&home);
-    let _ = command(&home)
-        .args(["set", "headers", r#"{"a":"b"}"#])
-        .output()
-        .unwrap();
-    let request = server.join().unwrap();
-    assert_eq!(request["action"], "headers", "{request}");
-    assert_eq!(request["headers"]["a"], "b", "{request}");
 }

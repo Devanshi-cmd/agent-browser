@@ -346,13 +346,17 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
 /// Parses `--headers` (and `set headers`): a JSON object whose values are all
 /// strings. Errors never include the raw input, since headers often carry tokens.
 pub fn parse_page_headers(raw: &str) -> Result<Value, String> {
+    parse_headers_value(raw, "--headers")
+}
+
+fn parse_headers_value(raw: &str, label: &str) -> Result<Value, String> {
     let headers = serde_json::from_str::<Value>(raw)
-        .map_err(|e| format!("Invalid JSON for --headers at column {}", e.column()))?;
+        .map_err(|e| format!("Invalid JSON for {label} at column {}", e.column()))?;
     let valid = headers
         .as_object()
         .is_some_and(|map| map.values().all(Value::is_string));
     if !valid {
-        return Err("--headers must be a JSON object with string values".to_string());
+        return Err(format!("{label} must be a JSON object with string values"));
     }
     Ok(headers)
 }
@@ -3665,7 +3669,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            let headers = parse_page_headers(headers_json).map_err(|message| {
+            let headers = parse_headers_value(headers_json, "set headers").map_err(|message| {
                 ParseError::InvalidValue {
                     message,
                     usage: "set headers <json> (must be valid JSON object)",
@@ -6550,6 +6554,20 @@ mod tests {
         flags.headers = Some(r#"{"X-Test":1}"#.to_string());
         let result = parse_command(&args("open api.example.com"), &flags);
         assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_navigate_keeps_valid_headers() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"X-Test":"ok"}"#.to_string());
+        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        assert_eq!(cmd["headers"]["X-Test"], "ok");
+    }
+
+    #[test]
+    fn test_set_headers_error_names_the_command() {
+        let err = parse_headers_value("[1]", "set headers").unwrap_err();
+        assert_eq!(err, "set headers must be a JSON object with string values");
     }
 
     #[test]
