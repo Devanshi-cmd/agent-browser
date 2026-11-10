@@ -103,9 +103,10 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
             .as_object()
             .ok_or_else(|| "read headers must be a JSON object".to_string())?;
         for (key, value) in map {
-            if let Some(value) = value.as_str() {
-                headers.insert(key.to_string(), value.to_string());
-            }
+            let value = value.as_str().ok_or_else(|| {
+                "read headers must be a JSON object with string values".to_string()
+            })?;
+            headers.insert(key.to_string(), value.to_string());
         }
     }
     let allowed_domains = cmd

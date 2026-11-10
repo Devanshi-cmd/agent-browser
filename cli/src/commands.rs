@@ -343,6 +343,24 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
     Ok(headers)
 }
 
+/// Parses `--headers` (and `set headers`): a JSON object whose values are all
+/// strings. Errors never include the raw input, since headers often carry tokens.
+pub fn parse_page_headers(raw: &str) -> Result<Value, String> {
+    parse_headers_value(raw, "--headers")
+}
+
+fn parse_headers_value(raw: &str, label: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for {label} at column {}", e.column()))?;
+    let valid = headers
+        .as_object()
+        .is_some_and(|map| map.values().all(Value::is_string));
+    if !valid {
+        return Err(format!("{label} must be a JSON object with string values"));
+    }
+    Ok(headers)
+}
+
 /// Parses command arguments, including literal fill/type text after `--`.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -453,13 +471,12 @@ fn parse_command_inner(
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
-                let headers =
-                    serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
-                        ParseError::InvalidValue {
-                            message: format!("Invalid JSON for --headers: {}", headers_json),
-                            usage: "open <url> --headers '{\"Key\": \"Value\"}'",
-                        }
-                    })?;
+                let headers = parse_page_headers(headers_json).map_err(|message| {
+                    ParseError::InvalidValue {
+                        message,
+                        usage: "open <url> --headers '{\"Key\": \"Value\"}'",
+                    }
+                })?;
                 nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
@@ -2706,18 +2723,12 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
         cmd["url"] = json!(url);
     }
     if let Some(ref headers_json) = flags.headers {
-        let headers = serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
+        let headers = parse_page_headers(headers_json).map_err(|message| {
             ParseError::InvalidValue {
-                message: format!("Invalid JSON for --headers: {}", headers_json),
+                message,
                 usage: READ_USAGE,
             }
         })?;
-        if !headers.is_object() {
-            return Err(ParseError::InvalidValue {
-                message: format!("Invalid JSON object for --headers: {}", headers_json),
-                usage: READ_USAGE,
-            });
-        }
         cmd["headers"] = headers;
     }
     if let Some(ref allowed_domains) = flags.allowed_domains {
@@ -3658,12 +3669,12 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            // Parse the JSON string into an object
-            let headers: serde_json::Value =
-                serde_json::from_str(headers_json).map_err(|_| ParseError::MissingArguments {
-                    context: "set headers".to_string(),
+            let headers = parse_headers_value(headers_json, "set headers").map_err(|message| {
+                ParseError::InvalidValue {
+                    message,
                     usage: "set headers <json> (must be valid JSON object)",
-                })?;
+                }
+            })?;
             Ok(json!({ "id": id, "action": "headers", "headers": headers }))
         }
         Some("credentials") | Some("auth") => {
@@ -6512,6 +6523,60 @@ mod tests {
         assert!(parse_cdp_headers("{bad").is_err());
         assert!(parse_cdp_headers(r#"["x"]"#).is_err());
         assert!(parse_cdp_headers(r#"{"Authorization":123}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_page_headers_rejects_invalid_shapes() {
+        assert!(parse_page_headers(r#"{"Authorization":"Bearer t"}"#).is_ok());
+        assert!(parse_page_headers("not json").is_err());
+        assert!(parse_page_headers(r#"["X-Test"]"#).is_err());
+        assert!(parse_page_headers(r#"{"X-Test":1}"#).is_err());
+        assert!(parse_page_headers(r#"{"X-Test":null}"#).is_err());
+        assert!(parse_page_headers(r#"{"X-Test":{}}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_page_headers_errors_never_echo_values() {
+        for raw in [
+            r#"{"Authorization":"Bearer SECRET",}"#,
+            r#"{"Authorization":"Bearer SECRET","n":1}"#,
+            r#"{"Authorization":null,"n":"SECRET"}"#,
+            r#"["Bearer SECRET"]"#,
+        ] {
+            let err = parse_page_headers(raw).unwrap_err();
+            assert!(!err.contains("SECRET"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_navigate_rejects_non_string_headers() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"X-Test":1}"#.to_string());
+        let result = parse_command(&args("open api.example.com"), &flags);
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_navigate_keeps_valid_headers() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"X-Test":"ok"}"#.to_string());
+        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        assert_eq!(cmd["headers"]["X-Test"], "ok");
+    }
+
+    #[test]
+    fn test_set_headers_error_names_the_command() {
+        let err = parse_headers_value("[1]", "set headers").unwrap_err();
+        assert_eq!(err, "set headers must be a JSON object with string values");
+    }
+
+    #[test]
+    fn test_set_headers_validates_shape() {
+        assert!(parse_command(&args(r#"set headers [1]"#), &default_flags()).is_err());
+        assert!(parse_command(&args(r#"set headers {"a":1}"#), &default_flags()).is_err());
+        let cmd = parse_command(&args(r#"set headers {"a":"b"}"#), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "headers");
+        assert_eq!(cmd["headers"]["a"], "b");
     }
 
     #[test]
